@@ -21,8 +21,6 @@ from keras import optimizers
 from keras.utils import multi_gpu_model
 from keras.utils.data_utils import Sequence
 
-import ipyparallel as ipp
-
 # Constant.
 IS_DEBUG = True
 
@@ -95,27 +93,46 @@ class TextSummarizer(object):
             input1 = Input(shape=(ARTICLE_MAX_SEQUENCE_LENGTH,), name='input1')
             x1 = self.embedding_layer(input1)
             
-            _, c = GRU(self.hps['gru1_dim'], return_state = True, name='gru1')(x1)
+            x1 = GRU(self.hps['gru1_dim'], return_sequences=True, name='gru1')(x1) #?
+            _, c = GRU(self.hps['gru1_dim'], return_state=True, name='gru1_2')(x1)
             
             # Input2: summary text, n (n sequence), (token index). 
             input2 = Input(shape=(SUMMARY_MAX_SEQUENCE_LENGTH,), name='input2')
             x2 = self.embedding_layer(input2)
+
+            x2 = GRU(self.hps['gru2_dim']
+                     , return_sequences=True
+                     , name='gru2')(x2)            
+            x2, _ = GRU(self.hps['gru2_dim']
+                     , return_sequences=True
+                     , return_state=True
+                     , name='gru2_2')(x2, initial_state=c)
+
+            # Input3: article text, n (n sequence), (token index). 
+            input3 = Input(shape=(ARTICLE_MAX_SEQUENCE_LENGTH,), name='input3')
+            x3 = self.embedding_layer(input3)
+
+            x3 = GRU(self.hps['gru1_dim']
+                     , return_sequences=True
+                     , name='gru3')(x3)             
+            x3, _ = GRU(self.hps['gru1_dim']
+                     , return_sequences=True
+                     , return_state=True
+                     , name='gru3_2')(x3, initial_state=c)           
             
-            x, _ = GRU(self.hps['gru2_dim']
-                     , return_sequences = True
-                     , return_state = True
-                     , name='gru2')(x2, initial_state = c)
-            
-            output = Dense(MAX_NUM_WORDS
-                                   , activation = 'softmax'
-                                   , name = 'output')(x)
+            output2 = Dense(MAX_NUM_WORDS
+                                   , activation='softmax'
+                                   , name='output2')(x2)
+            output3 = Dense(MAX_NUM_WORDS
+                                   , activation='softmax'
+                                   , name='output3')(x3)
                                             
             # Create the model.
             if IS_MULTI_GPU == True:
-                self.model = multi_gpu_model(Model(inputs=[input1, input2]
-                                                   , outputs=[output]), gpus = NUM_GPUS)
+                self.model = multi_gpu_model(Model(inputs=[input1, input2, input3]
+                                                   , outputs=[output2, output3]), gpus = NUM_GPUS)
             else:
-                self.model = Model(inputs=[input1, input2], outputs=[output])  
+                self.model = Model(inputs=[input1, input2, input3], outputs=[output2, output3])  
         
             # Compile the model.
             optimizer = optimizers.Adam(lr=self.hps['lr']
@@ -131,7 +148,8 @@ class TextSummarizer(object):
         """Make summary generation model."""
         input1 = Input(shape=(ARTICLE_MAX_SEQUENCE_LENGTH,))
         x = self.embedding_layer(input1)
-        _, c = self.model.get_layer('gru1')(x)
+        x = self.model.get_layer('gru1')(x)
+        _, c = self.model.get_layer('gru1_2')(x)
                 
         self.article_f_gen = Model([input1], [c])
 
@@ -139,8 +157,9 @@ class TextSummarizer(object):
         x = self.embedding_layer(input2)
 
         r = Input(shape=(self.hps['gru2_dim'],))
-        x, c = self.model.get_layer('gru2')(x, initial_state = r)
-        output = self.model.get_layer('output')(x)         
+        x = self.model.get_layer('gru2')(x)
+        x, c = self.model.get_layer('gru2_2')(x, initial_state = r)
+        output = self.model.get_layer('output2')(x)         
     
         self.summary_gen_model = Model([input2, r], [output, c])
 
@@ -171,6 +190,8 @@ class TextSummarizer(object):
             # TODO
             
             articles = []
+            articles_b = []
+            articles_t = []
             summary_paras_b = []
             summary_paras_t = []
             
@@ -246,15 +267,29 @@ class TextSummarizer(object):
                 if len(article) != ARTICLE_MAX_SEQUENCE_LENGTH:
                     continue
                 
+                article_t = np.flip(article)
+                article_t_onehot = np.zeros(shape=(len(article_t), MAX_NUM_WORDS), dtype=np.int32)
+                ci = 0
+                for wi in article_t:
+                    article_t_onehot[ci, wi] = 1
+                    ci +=1
+                    
+                article_b = np.concatenate([np.zeros(shape=(1), dtype=np.int32), article_t[:-1]])
+                
                 summary_paras_t.append(summary_t_onehot)
                 summary_paras_b.append(summary_b)
                 articles.append(article)
+                articles_t.append(article_t_onehot)
+                articles_b.append(article_b)
                 
             articles = np.asarray(articles)
+            articles_b = np.asarray(articles_b)
+            articles_t = np.asarray(articles_t)
             summary_paras_b = np.asarray(summary_paras_b)
             summary_paras_t = np.asarray(summary_paras_t)
             
-            return ({'input1': articles, 'input2': summary_paras_b}, {'output': summary_paras_t})
+            return ({'input1': articles, 'input2': summary_paras_b, 'input3': articles_b}
+                    , {'output2': summary_paras_t, 'output3': articles_t})
         
     def train(self):
         """Train."""        
@@ -444,4 +479,4 @@ if __name__ == '__main__':
     parser.add_argument('--model_loading')
     args = parser.parse_args()
     
-    main(args)      
+    main(args)    
